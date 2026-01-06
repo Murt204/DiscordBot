@@ -1,0 +1,16 @@
+{
+  "guilds": {
+    "1411269846615982082": {
+      "memberCountChannel": "1411269847307915408",
+      "welcomeConfig": null,
+      "botColor": 3002359,
+      "autoJoinRole": null,
+      "ticketConfig": null,
+      "levelRoles": [],
+      "gameId": "136999263682804"
+    }
+  },
+  "users": {
+    "415575464745107456": 3464820704
+  }
+}

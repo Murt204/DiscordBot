@@ -1,0 +1,26 @@
+{
+  "name": "discord-member-count-bot",
+  "version": "1.0.0",
+  "description": "Discord bot with slash commands and member count channel",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "body-parser": "^2.2.1",
+    "canvas": "^3.2.0",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "express": "^5.2.1",
+    "jimp": "^0.22.12"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "slash-commands"
+  ],
+  "author": "",
+  "license": "MIT"
+}
