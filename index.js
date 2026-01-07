@@ -1,6 +1,7 @@
 const { Client, GatewayIntentBits, Collection, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelType, PermissionFlagsBits, AttachmentBuilder, ActivityType } = require('discord.js');
 const Jimp = require('jimp');
 const { createCanvas, loadImage, registerFont } = require('canvas');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const axios = require('axios');
 const express = require('express');
@@ -60,7 +61,10 @@ function getGuildConfig(guildId) {
             autoJoinRole: null,
             ticketConfig: null,
             levelRoles: [],
-            gameId: null
+            gameId: null,
+            playerCountChannel: null,
+            logsChannel: null,
+            warns: {}
         };
         saveConfig();
     }
@@ -124,6 +128,42 @@ const memberCountChannels = {
     has: (guildId) => !!getGuildConfig(guildId).memberCountChannel
 };
 
+const playerCountChannels = {
+    get: (guildId) => getGuildConfig(guildId).playerCountChannel,
+    set: (guildId, value) => { getGuildConfig(guildId).playerCountChannel = value; saveConfig(); },
+    delete: (guildId) => { getGuildConfig(guildId).playerCountChannel = null; saveConfig(); },
+    has: (guildId) => !!getGuildConfig(guildId).playerCountChannel
+};
+
+const logChannels = {
+    get: (guildId) => getGuildConfig(guildId).logsChannel,
+    set: (guildId, value) => { getGuildConfig(guildId).logsChannel = value; saveConfig(); },
+    delete: (guildId) => { getGuildConfig(guildId).logsChannel = null; saveConfig(); },
+    has: (guildId) => !!getGuildConfig(guildId).logsChannel
+};
+
+const guildWarns = {
+    get: (guildId, userId) => {
+        const gConfig = getGuildConfig(guildId);
+        if (!gConfig.warns) gConfig.warns = {};
+        return gConfig.warns[userId] || [];
+    },
+    add: (guildId, userId, warning) => {
+        const gConfig = getGuildConfig(guildId);
+        if (!gConfig.warns) gConfig.warns = {};
+        if (!gConfig.warns[userId]) gConfig.warns[userId] = [];
+        gConfig.warns[userId].push(warning);
+        saveConfig();
+    },
+    clear: (guildId, userId) => {
+        const gConfig = getGuildConfig(guildId);
+        if (gConfig.warns && gConfig.warns[userId]) {
+            delete gConfig.warns[userId];
+            saveConfig();
+        }
+    }
+};
+
 // Runtime-only storage (not persisted - tickets and XP)
 const activeTickets = new Collection();
 const closedTickets = new Collection();
@@ -141,7 +181,15 @@ client.once(Events.ClientReady, async () => {
     // Update member count for all guilds on startup
     for (const guild of client.guilds.cache.values()) {
         await updateMemberCount(guild);
+        await updatePlayerCount(guild);
     }
+
+    // Start loops
+    setInterval(async () => {
+        for (const guild of client.guilds.cache.values()) {
+            await updatePlayerCount(guild);
+        }
+    }, 5 * 60 * 1000); // Check every 5 mins
 
     // --- API SERVER FOR ROBLOX ---
 
@@ -226,6 +274,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await handleUnlinkSlash(interaction);
         } else if (commandName === 'help') {
             await handleHelpSlash(interaction);
+        } else if (commandName === 'ban') {
+            await handleBanSlash(interaction);
+        } else if (commandName === 'kick') {
+            await handleKickSlash(interaction);
+        } else if (commandName === 'warn') {
+            await handleWarnSlash(interaction);
         }
     } else if (interaction.isButton()) {
         if (interaction.customId.startsWith('leaderboard_')) {
@@ -270,6 +324,10 @@ client.on(Events.MessageCreate, async (message) => {
         await handleSetMemberCountPrefix(message, args);
     } else if (command === 'removemembercount') {
         await handleRemoveMemberCountPrefix(message);
+    } else if (command === 'setplayercount') {
+        await handleSetPlayerCountPrefix(message, args);
+    } else if (command === 'removeplayercount') {
+        await handleRemovePlayerCountPrefix(message);
     } else if (command === 'welcomesetup') {
         await handleWelcomeSetupPrefix(message, args);
     } else if (command === 'welcomemessage') {
@@ -292,6 +350,8 @@ client.on(Events.MessageCreate, async (message) => {
         await handleListLevelRolesPrefix(message);
     } else if (command === 'setgameid') {
         await handleSetGameIdPrefix(message, args);
+    } else if (command === 'warns') {
+        await handleWarnsPrefix(message, args);
     }
 });
 
@@ -319,6 +379,135 @@ async function updateMemberCount(guild) {
     } catch (error) {
         console.error(`Failed to update member count for ${guild.name}:`, error);
     }
+}
+
+async function updatePlayerCount(guild) {
+    const guildConfig = getGuildConfig(guild.id);
+    const channelId = guildConfig.playerCountChannel;
+    const gameId = guildConfig.gameId;
+
+    if (!channelId || !gameId) return;
+
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel) {
+        // Channel was deleted
+        guildConfig.playerCountChannel = null;
+        saveConfig();
+        return;
+    }
+
+    try {
+        const playerCount = await getRobloxPlayerCount(gameId);
+        if (playerCount === null) return;
+
+        const newName = `Playing: ${playerCount.toLocaleString()}`;
+
+        if (channel.name !== newName) {
+            await channel.setName(newName);
+            console.log(`Updated player count for ${guild.name}: ${playerCount}`);
+        }
+    } catch (error) {
+        console.error(`Failed to update player count for ${guild.name}:`, error);
+        // Rate limit handling - if we hit rate limits, just wait for next loop
+    }
+}
+
+async function getRobloxPlayerCount(gameId) {
+    try {
+        // Try treating it as a Universe ID first (preferred)
+        // API: https://games.roblox.com/v1/games?universeIds=...
+        let response = await axios.get(`https://games.roblox.com/v1/games?universeIds=${gameId}`);
+
+        if (response.data && response.data.data && response.data.data.length > 0) {
+            return response.data.data[0].playing;
+        }
+
+        // If that failed or returned nothing, it might be a Place ID.
+        // Convert Place ID -> Universe ID
+        // API: https://games.roblox.com/v1/games/multiget-place-details?placeIds=...
+        const headers = {};
+        if (process.env.ROBLOX_COOKIE) {
+            headers['Cookie'] = process.env.ROBLOX_COOKIE;
+        }
+
+        response = await axios.get(`https://games.roblox.com/v1/games/multiget-place-details?placeIds=${gameId}`, {
+            headers: headers
+        });
+
+        if (response.data && response.data.length > 0) {
+            const universeId = response.data[0].universeId;
+            // Now fetch count with the correct Universe ID
+            const gameResponse = await axios.get(`https://games.roblox.com/v1/games?universeIds=${universeId}`);
+            if (gameResponse.data && gameResponse.data.data && gameResponse.data.data.length > 0) {
+                return gameResponse.data.data[0].playing;
+            }
+        }
+
+        return null; // Could not find game
+    } catch (error) {
+        console.error(`Error fetching Roblox player count for ID ${gameId}:`, error.message);
+        return null;
+    }
+}
+
+async function handleSetPlayerCountPrefix(message, args) {
+    if (!message.member.permissions.has('ManageChannels')) {
+        return message.reply('❌ You need the "Manage Channels" permission to use this command.');
+    }
+
+    if (!config.guilds[message.guild.id].gameId) {
+        return message.reply('❌ No Game ID set! Please set a game ID first using `!setgameid <id>`.');
+    }
+
+    // Default to the channel the command was used in if no channel mentioned
+    let targetChannel = message.channel;
+
+    if (args.length > 0) {
+        // Check if an ID was pasted
+        if (args[0].match(/^\d+$/) && !args[0].startsWith('<#')) {
+            // This looks like a channel ID
+            const chCallback = message.guild.channels.cache.get(args[0]);
+            if (chCallback) targetChannel = chCallback;
+        } else {
+            // Check mentions
+            const channelId = args[0].replace(/[<#>]/g, '');
+            const chCallback = message.guild.channels.cache.get(channelId);
+            if (chCallback) targetChannel = chCallback;
+        }
+    }
+
+    // It should be a voice channel ideally, but text works too (locked)
+    // Common practice is Voice Channel so users can't type in it easily and it looks clean
+    if (targetChannel.type !== 2) { // 2 = Voice Channel
+        // Warn but allow (or just create one?)
+        // Let's just warn
+        // return message.reply('❌ Please use a Voice Channel for the counter (it looks better!). Create a voice channel and mention it: `!setplayercount #channel`');
+    }
+
+    const guildConfig = getGuildConfig(message.guild.id);
+    guildConfig.playerCountChannel = targetChannel.id;
+    saveConfig();
+
+    await message.reply(`✅ Player count channel set to **${targetChannel.name}**! It will update every 5 minutes.`);
+
+    // Trigger immediate update
+    await updatePlayerCount(message.guild);
+}
+
+async function handleRemovePlayerCountPrefix(message) {
+    if (!message.member.permissions.has('ManageChannels')) {
+        return message.reply('❌ You need the "Manage Channels" permission to use this command.');
+    }
+
+    const guildConfig = getGuildConfig(message.guild.id);
+    if (!guildConfig.playerCountChannel) {
+        return message.reply('❌ No player count channel is currently set.');
+    }
+
+    guildConfig.playerCountChannel = null;
+    saveConfig();
+
+    await message.reply('✅ Player count channel disabled.');
 }
 
 async function handleSetMemberCount(interaction) {
@@ -510,9 +699,19 @@ async function assignLevelRole(member, level) {
 
 async function sendLevelUpMessage(message, newLevel) {
     try {
-        await message.reply(`🎉 Congratulations ${message.author}! You've reached **Level ${newLevel}**!`);
+        // Try to DM the user first (Strictly "Only user can see")
+        await message.author.send(`🎉 Congratulations! You've reached **Level ${newLevel}** in **${message.guild.name}**!`);
     } catch (error) {
-        console.error('Failed to send level up message:', error);
+        // If DMs are blocked, send a temporary message in the channel and delete it after 5 seconds
+        // This is the next best thing to "only user seeing", as it doesn't clutter the chat
+        try {
+            const reply = await message.reply(`🎉 Congratulations ${message.author}! You've reached **Level ${newLevel}**!`);
+            setTimeout(() => {
+                reply.delete().catch(() => { });
+            }, 5000);
+        } catch (e) {
+            console.error('Failed to send fallback level up message:', e);
+        }
     }
 }
 
@@ -1330,7 +1529,7 @@ async function handleCommandsPanel(message) {
                 },
                 {
                     name: 'Member Count',
-                    value: '`!setmembercount <channel-id>` - Set member count channel\n`!removemembercount` - Remove member count tracking',
+                    value: '`!setmembercount <channel-id>` - Set member count channel\n`!removemembercount` - Remove member count tracking\n`!setplayercount <channel-id>` - Set player count channel\n`!removeplayercount` - Remove player count tracking',
                     inline: false
                 }
             ]
@@ -1402,6 +1601,23 @@ async function handleCommandsPanel(message) {
                     inline: false
                 }
             ]
+        },
+        moderation: {
+            title: '🛡️ Moderation',
+            description: 'Moderation commands and logging',
+            emoji: '🛡️',
+            fields: [
+                {
+                    name: 'Actions',
+                    value: '`/ban <user> <reason>` - Ban a member\n`/kick <user> <reason>` - Kick a member\n`/warn <user> <reason>` - Warn a member',
+                    inline: false
+                },
+                {
+                    name: 'Configuration',
+                    value: '`!setlogs #channel` - Set moderation logs channel',
+                    inline: false
+                }
+            ]
         }
     };
 
@@ -1414,7 +1630,7 @@ async function handleCommandsPanel(message) {
                 .setDescription('Select a category from the dropdown menu below to view specific commands.')
                 .setColor(botColor)
                 .addFields(
-                    { name: 'Available Categories', value: '🎨 **Configuration** - Core settings\n📋 **Welcome** - Welcome messages\n🎫 **Tickets** - Support tickets\n🏅 **Leveling** - XP and Roles\n🎮 **Roblox Game** - Game stats & config', inline: false }
+                    { name: 'Available Categories', value: '🎨 **Configuration** - Core settings\n📋 **Welcome** - Welcome messages\n🎫 **Tickets** - Support tickets\n🏅 **Leveling** - XP and Roles\n🎮 **Roblox Game** - Game stats & config\n🛡️ **Moderation** - Ban, Kick, Warn & Logs', inline: false }
                 )
                 .setFooter({ text: 'Use the dropdown menu to navigate categories' })
                 .setTimestamp();
@@ -1453,11 +1669,17 @@ async function handleCommandsPanel(message) {
                 .setDescription('XP system and level rewards')
                 .setValue('level')
                 .setEmoji('🏅'),
+
             new StringSelectMenuOptionBuilder()
                 .setLabel('Roblox Game')
                 .setDescription('Game integration and stats')
                 .setValue('game')
-                .setEmoji('🎮')
+                .setEmoji('🎮'),
+            new StringSelectMenuOptionBuilder()
+                .setLabel('Moderation')
+                .setDescription('Ban, kick, warn and logging')
+                .setValue('moderation')
+                .setEmoji('🛡️')
         );
 
     const row = new ActionRowBuilder().addComponents(selectMenu);
@@ -1580,6 +1802,219 @@ async function handleRemoveAutoRolePrefix(message) {
 
     await message.reply(`✅ Auto-join role removed. New members will no longer automatically receive the **${roleName}** role.`);
 }
+
+async function logAction(guild, action, targetUser, moderator, reason, fields = []) {
+    const channelId = logChannels.get(guild.id);
+    if (!channelId) return;
+
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel) return;
+
+    const botColor = getBotColor(guild.id);
+
+    let color = botColor;
+    if (action === 'BAN') color = 0xFF0000;      // Red
+    else if (action === 'KICK') color = 0xFFA500; // Orange
+    else if (action === 'WARN') color = 0xFFFF00; // Yellow
+
+    const embed = new EmbedBuilder()
+        .setTitle(`🛡️ Moderation: ${action}`)
+        .setColor(color)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+            { name: 'User', value: `${targetUser.tag} (\`${targetUser.id}\`)`, inline: true },
+            { name: 'Moderator', value: `${moderator.tag}`, inline: true },
+            { name: 'Reason', value: reason || 'No reason provided', inline: false }
+        )
+        .setTimestamp();
+
+    if (fields.length > 0) {
+        embed.addFields(fields);
+    }
+
+    try {
+        await channel.send({ embeds: [embed] });
+    } catch (error) {
+        console.error(`Failed to send log to ${guild.name}:`, error);
+    }
+}
+
+async function handleSetLogsPrefix(message, args) {
+    if (!message.member.permissions.has('ManageGuild')) {
+        return message.reply('❌ You need the "Manage Server" permission to use this command.');
+    }
+
+    if (args.length === 0) {
+        return message.reply('❌ Please specify a channel. Usage: `!setlogs #channel`');
+    }
+
+    const channelMention = args[0];
+    const channelId = channelMention.replace(/[<#>]/g, '');
+    const channel = message.guild.channels.cache.get(channelId);
+
+    if (!channel || channel.type !== 0) { // 0 = Text Channel
+        return message.reply('❌ Please provide a valid text channel ID or mention. Usage: `!setlogs <channel-id>`');
+    }
+
+    logChannels.set(message.guild.id, channel.id);
+    await message.reply(`✅ Moderation logs will now be sent to **${channel.name}** (\`${channel.id}\`)!`);
+}
+
+async function handleBanSlash(interaction) {
+    if (!interaction.member.permissions.has('BanMembers')) {
+        return interaction.reply({ content: '❌ You need the "Ban Members" permission.', ephemeral: true });
+    }
+
+    const user = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+    const member = interaction.guild.members.cache.get(user.id);
+
+    if (member) {
+        if (!member.bannable) {
+            return interaction.reply({ content: '❌ I cannot ban this user. They may have a higher role than me.', ephemeral: true });
+        }
+    }
+
+    await interaction.deferReply();
+
+    try {
+        // Try to DM the user
+        try {
+            await user.send(`🛑 You have been **BANNED** from **${interaction.guild.name}**.\nReason: ${reason}`);
+        } catch (e) { }
+
+        await interaction.guild.members.ban(user, { reason: reason });
+
+        await interaction.editReply(`✅ **${user.tag}** has been banned.`);
+        await logAction(interaction.guild, 'BAN', user, interaction.user, reason);
+
+    } catch (error) {
+        console.error(error);
+        await interaction.editReply('❌ Failed to ban user.');
+    }
+}
+
+async function handleKickSlash(interaction) {
+    if (!interaction.member.permissions.has('KickMembers')) {
+        return interaction.reply({ content: '❌ You need the "Kick Members" permission.', ephemeral: true });
+    }
+
+    const user = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+    const member = interaction.guild.members.cache.get(user.id);
+
+    if (!member) {
+        return interaction.reply({ content: '❌ User not found in this server.', ephemeral: true });
+    }
+
+    if (!member.kickable) {
+        return interaction.reply({ content: '❌ I cannot kick this user. They may have a higher role than me.', ephemeral: true });
+    }
+
+    await interaction.deferReply();
+
+    try {
+        // Try to DM
+        try {
+            await user.send(`⚠️ You have been **KICKED** from **${interaction.guild.name}**.\nReason: ${reason}`);
+        } catch (e) { }
+
+        await member.kick(reason);
+
+        await interaction.editReply(`✅ **${user.tag}** has been kicked.`);
+        await logAction(interaction.guild, 'KICK', user, interaction.user, reason);
+
+    } catch (error) {
+        console.error(error);
+        await interaction.editReply('❌ Failed to kick user.');
+    }
+}
+
+async function handleWarnSlash(interaction) {
+    if (!interaction.member.permissions.has('ModerateMembers')) {
+        return interaction.reply({ content: '❌ You need the "Moderate Members" permission.', ephemeral: true });
+    }
+
+    const user = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason provided';
+
+    await interaction.deferReply();
+
+    try {
+        let dmSent = false;
+        try {
+            await user.send(`⚠️ **WARNING** from **${interaction.guild.name}**:\n${reason}`);
+            dmSent = true;
+        } catch (e) {
+            dmSent = false;
+        }
+
+        await interaction.editReply(`✅ **${user.tag}** has been warned.${!dmSent ? ' (Could not enable DM)' : ''}`);
+
+        // Save warning
+        guildWarns.add(interaction.guild.id, user.id, {
+            reason: reason,
+            moderatorId: interaction.user.id,
+            timestamp: Date.now()
+        });
+
+        await logAction(interaction.guild, 'WARN', user, interaction.user, reason);
+
+    } catch (error) {
+        console.error(error);
+        await interaction.editReply('❌ Failed to warn user.');
+    }
+}
+
+async function handleWarnsPrefix(message, args) {
+    const targetUser = message.mentions.users.first() || (args[0] ? await client.users.fetch(args[0]).catch(() => null) : message.author);
+
+    if (!targetUser) {
+        return message.reply('❌ User not found.');
+    }
+
+    // Permission check: You can see your own warns, but need permission to see others
+    if (targetUser.id !== message.author.id && !message.member.permissions.has('ModerateMembers')) {
+        return message.reply('❌ You need the "Moderate Members" permission to view warnings for other users.');
+    }
+
+    const warns = guildWarns.get(message.guild.id, targetUser.id);
+    const botColor = getBotColor(message.guild.id);
+
+    const embed = new EmbedBuilder()
+        .setTitle(`⚠️ Warnings for ${targetUser.username}`)
+        .setColor(botColor)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .setFooter({ text: `Total Warnings: ${warns.length}` })
+        .setTimestamp();
+
+    if (warns.length === 0) {
+        embed.setDescription('✅ This user has no warnings.');
+    } else {
+        // Show last 10 warnings to avoid hitting limit
+        const recentWarns = warns.slice(-10).reverse();
+
+        // Asynchronously clear promises for moderator fetching
+        const fields = await Promise.all(recentWarns.map(async (warn, index) => {
+            const moderator = await client.users.fetch(warn.moderatorId).catch(() => ({ tag: 'Unknown Mod' }));
+            const date = new Date(warn.timestamp).toLocaleDateString();
+            return {
+                name: `Warning #${warns.length - index}`,
+                value: `**Reason:** ${warn.reason}\n**Mod:** ${moderator.tag} • **Date:** ${date}`,
+                inline: false
+            };
+        }));
+
+        embed.addFields(fields);
+
+        if (warns.length > 10) {
+            embed.setDescription(`*Showing last 10 of ${warns.length} warnings*`);
+        }
+    }
+
+    await message.reply({ embeds: [embed] });
+}
+
 
 async function handleSetMemberCountPrefix(message, args) {
     if (!message.member.permissions.has('ManageChannels')) {
@@ -1801,84 +2236,25 @@ async function handleWelcomeDisablePrefix(message) {
 }
 
 async function handleRestartPrefix(message) {
-    // Check if user has administrator permissions
     if (!message.member.permissions.has('Administrator')) {
         return message.reply('❌ You need the "Administrator" permission to restart the bot.');
     }
 
-    const botColor = getBotColor(message.guild.id);
-    const embed = new EmbedBuilder()
-        .setTitle('🔄 Bot Restart')
-        .setDescription('Are you sure you want to restart the bot? This will disconnect all users and reload all systems.')
-        .setColor(botColor)
-        .addFields(
-            { name: '⚠️ Warning', value: 'This action will:\n• Disconnect the bot temporarily\n• Clear all temporary data (XP, tickets, etc.)\n• Reload all bot systems\n• Take approximately 10-15 seconds', inline: false },
-            { name: '📝 Note', value: 'Only administrators can use this command', inline: false }
-        )
-        .setFooter({ text: 'React with ✅ to confirm restart or ❌ to cancel' })
-        .setTimestamp();
+    await message.reply('♻️ Restarting bot...');
 
-    const confirmMessage = await message.reply({ embeds: [embed] });
+    console.log(`Bot restart initiated by ${message.author.tag}`);
 
-    // Add reaction buttons
-    await confirmMessage.react('✅');
-    await confirmMessage.react('❌');
-
-    // Create reaction collector
-    const filter = (reaction, user) => {
-        return ['✅', '❌'].includes(reaction.emoji.name) && user.id === message.author.id;
-    };
-
-    const collector = confirmMessage.createReactionCollector({ filter, time: 30000, max: 1 });
-
-    collector.on('collect', async (reaction) => {
-        if (reaction.emoji.name === '✅') {
-            const restartEmbed = new EmbedBuilder()
-                .setTitle('🔄 Restarting Bot...')
-                .setDescription('The bot is now restarting. Please wait...')
-                .setColor(0xff9900)
-                .setFooter({ text: 'This may take 10-15 seconds' })
-                .setTimestamp();
-
-            await confirmMessage.edit({ embeds: [restartEmbed] });
-
-            // Log the restart
-            console.log(`Bot restart initiated by ${message.author.tag} (${message.author.id}) in ${message.guild.name}`);
-
-            // Wait a moment for the message to send
-            setTimeout(() => {
-                process.exit(0); // Exit the process - assuming you have a process manager that will restart it
-            }, 2000);
-
-        } else if (reaction.emoji.name === '❌') {
-            const cancelEmbed = new EmbedBuilder()
-                .setTitle('❌ Restart Cancelled')
-                .setDescription('Bot restart has been cancelled.')
-                .setColor(0xff0000)
-                .setTimestamp();
-
-            await confirmMessage.edit({ embeds: [cancelEmbed] });
-        }
+    // Spawn new process
+    const child = spawn(process.argv[0], process.argv.slice(1), {
+        detached: true,
+        stdio: 'inherit'
     });
 
-    collector.on('end', async (collected) => {
-        if (collected.size === 0) {
-            const timeoutEmbed = new EmbedBuilder()
-                .setTitle('⏰ Restart Timeout')
-                .setDescription('Restart confirmation timed out. No action taken.')
-                .setColor(0x808080)
-                .setTimestamp();
+    // Unreference the child so the parent can exit without waiting
+    child.unref();
 
-            await confirmMessage.edit({ embeds: [timeoutEmbed] });
-        }
-
-        // Remove reactions
-        try {
-            await confirmMessage.reactions.removeAll();
-        } catch (error) {
-            console.error('Failed to remove reactions:', error);
-        }
-    });
+    // Kill current process
+    process.exit(0);
 }
 
 // Ticket system handlers

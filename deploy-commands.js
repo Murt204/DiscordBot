@@ -91,6 +91,60 @@ const commands = [
         name: 'help',
         description: 'Show available commands',
     },
+    {
+        name: 'ban',
+        description: 'Ban a member from the server',
+        options: [
+            {
+                name: 'user',
+                description: 'The user to ban',
+                type: ApplicationCommandOptionType.User,
+                required: true,
+            },
+            {
+                name: 'reason',
+                description: 'Reason for the ban',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+        ],
+    },
+    {
+        name: 'kick',
+        description: 'Kick a member from the server',
+        options: [
+            {
+                name: 'user',
+                description: 'The user to kick',
+                type: ApplicationCommandOptionType.User,
+                required: true,
+            },
+            {
+                name: 'reason',
+                description: 'Reason for the kick',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+        ],
+    },
+    {
+        name: 'warn',
+        description: 'Warn a member',
+        options: [
+            {
+                name: 'user',
+                description: 'The user to warn',
+                type: ApplicationCommandOptionType.User,
+                required: true,
+            },
+            {
+                name: 'reason',
+                description: 'Reason for the warning',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+        ],
+    },
 
 ];
 

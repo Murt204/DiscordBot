@@ -2,12 +2,41 @@
   "guilds": {
     "1411269846615982082": {
       "memberCountChannel": "1411269847307915408",
-      "welcomeConfig": null,
+      "welcomeConfig": {
+        "enabled": true,
+        "channelId": "1457358062972305490",
+        "message": "Welcome to {server}, {user}! 🎉",
+        "useEmbed": false,
+        "embedTitle": "Welcome to {server}!",
+        "embedDescription": "Hey {user}, welcome to our awesome server! We now have {membercount} members.",
+        "embedColor": 65280,
+        "embedFooter": "Enjoy your stay!",
+        "showAvatar": true,
+        "showTimestamp": true
+      },
       "botColor": 3002359,
       "autoJoinRole": null,
       "ticketConfig": null,
-      "levelRoles": [],
-      "gameId": "136999263682804"
+      "levelRoles": [
+        {
+          "level": 5,
+          "roleId": "1458075074530906152"
+        },
+        {
+          "level": 10,
+          "roleId": "1458075152741830829"
+        },
+        {
+          "level": 20,
+          "roleId": "1458075194261245952"
+        },
+        {
+          "level": 50,
+          "roleId": "1458075244362203282"
+        }
+      ],
+      "gameId": "9035052227",
+      "playerCountChannel": "1458103278582628519"
     }
   },
   "users": {
