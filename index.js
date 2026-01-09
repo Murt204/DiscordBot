@@ -280,6 +280,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await handleKickSlash(interaction);
         } else if (commandName === 'warn') {
             await handleWarnSlash(interaction);
+        } else if (commandName === 'purge') {
+            await handlePurgeSlash(interaction);
         }
     } else if (interaction.isButton()) {
         if (interaction.customId.startsWith('leaderboard_')) {
@@ -1609,7 +1611,7 @@ async function handleCommandsPanel(message) {
             fields: [
                 {
                     name: 'Actions',
-                    value: '`/ban <user> <reason>` - Ban a member\n`/kick <user> <reason>` - Kick a member\n`/warn <user> <reason>` - Warn a member',
+                    value: '`/ban <user> <reason>` - Ban a member\n`/kick <user> <reason>` - Kick a member\n`/warn <user> <reason>` - Warn a member\n`/purge <amount>` - Bulk delete messages',
                     inline: false
                 },
                 {
@@ -1750,7 +1752,7 @@ async function handleSetAutoRolePrefix(message, args) {
         return message.reply(`❌ Please provide a role ID. Usage: \`!setautorole <role-id>\`\n\n**Current auto-join role:** ${currentRoleText}\n\n**How to get role ID:**\n1. Enable Developer Mode in Discord settings\n2. Right-click on a role in Server Settings > Roles\n3. Select "Copy Role ID"`);
     }
 
-    const roleId = args[0];
+    const roleId = args[0].replace(/[<@&>]/g, '');
     const role = message.guild.roles.cache.get(roleId);
 
     if (!role) {
@@ -1966,6 +1968,28 @@ async function handleWarnSlash(interaction) {
     }
 }
 
+async function handlePurgeSlash(interaction) {
+    if (!interaction.member.permissions.has('ManageMessages')) {
+        return interaction.reply({ content: '❌ You need the "Manage Messages" permission.', ephemeral: true });
+    }
+
+    const amount = interaction.options.getInteger('amount');
+
+    if (amount < 1 || amount > 100) {
+        return interaction.reply({ content: '❌ Please enter a number between 1 and 100.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+        const deleted = await interaction.channel.bulkDelete(amount, true);
+        await interaction.editReply(`✅ Successfully deleted **${deleted.size}** messages.`);
+    } catch (error) {
+        console.error(error);
+        await interaction.editReply('❌ Failed to delete messages. Messages older than 14 days cannot be bulk deleted.');
+    }
+}
+
 async function handleWarnsPrefix(message, args) {
     const targetUser = message.mentions.users.first() || (args[0] ? await client.users.fetch(args[0]).catch(() => null) : message.author);
 
@@ -2025,7 +2049,7 @@ async function handleSetMemberCountPrefix(message, args) {
         return message.reply('❌ Please specify a voice channel ID. Usage: `!setmembercount <channel-id>`\n\n**How to get channel ID:**\n1. Enable Developer Mode in Discord settings\n2. Right-click on a voice channel\n3. Select "Copy Channel ID"');
     }
 
-    const channelId = args[0];
+    const channelId = args[0].replace(/[<#>]/g, '');
     const channel = message.guild.channels.cache.get(channelId);
 
     if (!channel) {

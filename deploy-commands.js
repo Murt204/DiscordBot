@@ -145,7 +145,20 @@ const commands = [
             },
         ],
     },
-
+    {
+        name: 'purge',
+        description: 'Bulk delete messages',
+        options: [
+            {
+                name: 'amount',
+                description: 'Number of messages to delete (1-100)',
+                type: ApplicationCommandOptionType.Integer,
+                required: true,
+                min_value: 1,
+                max_value: 100,
+            },
+        ],
+    },
 ];
 
 const rest = new REST().setToken(process.env.DISCORD_TOKEN);
